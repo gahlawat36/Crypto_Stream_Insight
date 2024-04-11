@@ -1,0 +1,81 @@
+import org.apache.spark.sql._
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
+
+// Define the schema to match the structure of the incoming data
+val newsArticleSchema = new StructType(Array(
+  StructField("author", StringType, true),
+  StructField("content", StringType, true),
+  StructField("description", StringType, true),
+  StructField("publishedAt", StringType, true),
+  StructField("source", StructType(Array(
+    StructField("id", StringType, true),
+    StructField("name", StringType, true))), true),
+  StructField("title", StringType, true),
+  StructField("url", StringType, true),
+  StructField("urlToImage", StringType, true)))
+
+// Read from Kafka topic
+val kafkaStreamDF = spark.readStream
+  .format("kafka")
+  .option("kafka.bootstrap.servers", "10.128.0.2:9092") // Kafka broker address
+  .option("subscribe", "Crypto_Project") // Topic name
+  .option("startingOffsets", "earliest")
+  .load()
+
+// Deserialize the JSON data
+val rawArticlesDF = kafkaStreamDF.selectExpr("CAST(value AS STRING) as value")
+  .select(from_json($"value", newsArticleSchema).as("data"))
+  .select("data.*")
+
+// Write deserialized data to Parquet as a streaming query
+val query = rawArticlesDF.writeStream
+  .outputMode("append")
+  .format("parquet")
+  .option("path", "/NewsAPI/DataFrames/raw") // Output path
+  .option("checkpointLocation", "/NewsAPI/checkpoints/raw") // Checkpoint location
+  .start()
+
+// Wait for 2 seconds 
+Thread.sleep(2000)
+
+// Stop the query
+query.stop()
+
+// Read raw data from Parquet
+val articlesDF = spark.read.parquet("/NewsAPI/DataFrames/raw")
+articlesDF.show() // Print the raw data for verification
+
+// DataFrame 1: Count the number of articles per source
+val articlesBySourceDF = articlesDF
+  .groupBy($"source.name")
+  .agg(count($"title").alias("number_of_articles"))
+  .orderBy(desc("number_of_articles"))
+
+articlesBySourceDF.show() // Print the aggregated data for verification
+
+// Write to Parquet
+articlesBySourceDF.write.mode("overwrite").parquet("/NewsAPI/DataFrames/source")
+
+// DataFrame 2: Count the number of articles published on each date
+val articlesByDateDF = articlesDF
+  .withColumn("published_date", to_date($"publishedAt"))
+  .groupBy($"published_date")
+  .agg(count($"title").alias("number_of_articles"))
+  .orderBy(desc("published_date"))
+
+articlesByDateDF.show() // Print the aggregated data for verification
+
+// Write to Parquet
+articlesByDateDF.write.mode("overwrite").parquet("/NewsAPI/DataFrames/date")
+
+// DataFrame 3: Count the number of articles written by each author
+val articlesByAuthorDF = articlesDF
+  .groupBy($"author")
+  .agg(count($"title").alias("number_of_articles"))
+  .orderBy(desc("number_of_articles"))
+
+articlesByAuthorDF.show() // Print the aggregated data for verification
+
+// Write to Parquet
+articlesByAuthorDF.write.mode("overwrite").parquet("/NewsAPI/DataFrames/author")
